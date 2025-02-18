@@ -1,0 +1,9 @@
+flask
+twilio
+requests
+pillow
+pytesseract
+pdf2image
+transformers
+torch
+python-dotenv
