@@ -1,9 +1,22 @@
+# Bibliotecas principais
 flask
 twilio
 requests
+python-dotenv
+
+# Processamento de comprovantes (OCR)
 pillow
 pytesseract
 pdf2image
+opencv-python
+
+# Modelo LLaMA 2 e LLM
 transformers
 torch
-python-dotenv
+accelerate
+huggingface-hub
+
+# Utilitários
+numpy
+regex
+loguru
