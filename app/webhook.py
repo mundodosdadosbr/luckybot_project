@@ -1,56 +1,75 @@
 from flask import Blueprint, request, jsonify
-from twilio.twiml.messaging_response import MessagingResponse
+import requests
+import hashlib
+import hmac
+import os
 from app.llm_handler import gerar_resposta
 from app.payment_processor import processar_arquivo, validar_comprovante
 from app.utils import download_file, salvar_log
-import os
 
-# Criação do Blueprint para o webhook
 webhook_bp = Blueprint('webhook', __name__)
 
-# Rota para receber mensagens do WhatsApp
+# Configurações da API do WhatsApp
+WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
+API_URL = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
+
+# Verificação do Webhook (GET)
+@webhook_bp.route("/webhook", methods=["GET"])
+def verify_webhook():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    if mode == "subscribe" and token == os.getenv("WHATSAPP_VERIFY_TOKEN"):
+        return challenge, 200
+    return "Verificação falhou", 403
+
+# Receber Mensagens (POST)
 @webhook_bp.route("/webhook", methods=["POST"])
-def webhook():
-    # Inicializa a resposta do Twilio
-    response = MessagingResponse()
+def handle_webhook():
+    data = request.get_json()
+    salvar_log(f"Dados recebidos: {data}")
 
-    # Obtém a mensagem recebida
-    incoming_msg = request.form.get("Body", "").strip().lower()
-    media_url = request.form.get("MediaUrl0")  # URL da mídia (imagem ou PDF)
+    # Processar mensagem
+    if "messages" in data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}):
+        message = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        user_number = message["from"]
+        message_type = message["type"]
 
-    # Log da mensagem recebida
-    salvar_log(f"Mensagem recebida: {incoming_msg}")
-
-    # Verifica se a mensagem contém uma mídia (comprovante)
-    if media_url:
-        try:
-            # Baixa o arquivo
-            file_extension = media_url.split(".")[-1]
-            file_path = os.path.join("data", "comprovantes", f"comprovante.{file_extension}")
-            download_file(media_url, file_path)
-
-            # Processa o comprovante
+        if message_type == "text":
+            resposta = gerar_resposta(message["text"]["body"])
+        elif message_type == "image" or message_type == "document":
+            media_id = message["image"]["id"] if message_type == "image" else message["document"]["id"]
+            media_url = get_media_url(media_id)
+            file_path = download_file(media_url)
             texto_extraido = processar_arquivo(file_path)
-            if texto_extraido:
-                resposta = validar_comprovante(texto_extraido)
-            else:
-                resposta = "Não foi possível ler o comprovante. Envie uma imagem ou PDF mais nítido."
-        except Exception as e:
-            salvar_log(f"Erro ao processar comprovante: {e}")
-            resposta = "Ocorreu um erro ao processar o comprovante. Tente novamente."
-    else:
-        # Gera uma resposta usando o modelo LLaMA 2
-        try:
-            resposta = gerar_resposta(incoming_msg)
-        except Exception as e:
-            salvar_log(f"Erro ao gerar resposta: {e}")
-            resposta = "Desculpe, ocorreu um erro ao processar sua mensagem."
+            resposta = validar_comprovante(texto_extraido)
+        else:
+            resposta = "Formato não suportado."
 
-    # Adiciona a resposta ao Twilio
-    response.message(resposta)
+        # Enviar resposta
+        send_message(user_number, resposta)
 
-    # Log da resposta enviada
-    salvar_log(f"Resposta enviada: {resposta}")
+    return jsonify({"status": "success"}), 200
 
-    # Retorna a resposta no formato XML (exigido pelo Twilio)
-    return str(response)
+def get_media_url(media_id):
+    response = requests.get(
+        f"https://graph.facebook.com/v19.0/{media_id}",
+        headers={"Authorization": f"Bearer {WHATSAPP_API_TOKEN}"}
+    )
+    return response.json().get("url")
+
+def send_message(user_number, text):
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": user_number,
+        "type": "text",
+        "text": {"body": text}
+    }
+    response = requests.post(API_URL, headers=headers, json=payload)
+    salvar_log(f"Resposta enviada: {response.json()}")
